@@ -6,4 +6,4 @@ use App\Http\Controllers\WeatherController;
 Route::get('/', function () {
     return view('welcome');
 });
-Route::get('/weather/{city}', [WeatherController::class, 'show']);
+
