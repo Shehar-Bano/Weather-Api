@@ -4,92 +4,64 @@ namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
-use App\Models\User;
 
 class SendWeatherNotifications extends Command
 {
     protected $signature = 'weather:notify';
-    protected $description = 'Send weather notifications to users by city';
+
+    protected $description = 'Send hourly weather notifications city-wise using OneSignal segments';
 
     public function handle()
     {
-        $this->info("🔁 Starting weather notification process...");
+        $appId = env('ONESIGNAL_APP_ID');
+        $apiKey = env('ONESIGNAL_API_KEY');
+        $weatherKey = env('WEATHER_API_KEY');
 
-        // Step 1: Get all unique cities where users have device_token
-        $cities = User::whereNotNull('device_token')
+        $cities = UserDetail::select('city')
             ->whereNotNull('city')
-            ->groupBy('city')
+            ->distinct()
             ->pluck('city');
 
         foreach ($cities as $city) {
-            $this->sendCityWeatherNotification($city);
-        }
+            // Fetch weather for city
+            $weather = Http::get('https://api.openweathermap.org/data/2.5/weather', [
+                'q' => $city,
+                'appid' => $weatherKey,
+                'units' => 'metric',
+            ])->json();
 
-        $this->info("✅ Weather notifications sent successfully!");
-    }
+            if (! isset($weather['main'])) {
+                continue;
+            }
 
-    private function sendCityWeatherNotification($city)
-    {
-        $apiKey = env('WEATHER_API_KEY');
+            $temp = $weather['main']['temp'] ?? 0;
+            $humidity = $weather['main']['humidity'] ?? 0;
+            $wind = $weather['wind']['speed'] ?? 0;
+            $condition = $weather['weather'][0]['main'] ?? 'Clear';
 
-        $response = Http::get("https://api.openweathermap.org/data/2.5/weather", [
-            'q' => $city,
-            'appid' => $apiKey,
-            'units' => 'metric'
-        ]);
+            // Dynamic message
+            $message = match (strtolower($condition)) {
+                'rain', 'drizzle' => "🌧 Rain expected in $city! Don’t forget your umbrella ☔",
+                'clear' => "☀️ It's sunny in $city! Stay hydrated 💧",
+                'clouds' => "☁️ Cloudy weather in $city — nice day for a walk!",
+                'snow' => "❄️ Snowfall alert in $city! Keep warm 🧤",
+                default => "🌦 $city: $condition, Temp $temp°C, Humidity $humidity%, Wind $wind km/h",
+            };
 
-        if ($response->failed()) {
-            $this->error("❌ Failed to fetch weather for {$city}");
-            return;
-        }
+            // Send via OneSignal segment (city tag)
+            Http::withHeaders([
+                'Authorization' => 'Basic '.$apiKey,
+                'Content-Type' => 'application/json',
+            ])->post('https://onesignal.com/api/v1/notifications', [
+                'app_id' => $appId,
+                'filters' => [
+                    ['field' => 'tag', 'key' => 'city', 'relation' => '=', 'value' => $city],
+                ],
+                'headings' => ['en' => "Weather Update for $city"],
+                'contents' => ['en' => $message],
+            ]);
 
-        $data = $response->json();
-        $weatherMain = $data['weather'][0]['main'] ?? 'Unknown';
-        $temp = $data['main']['temp'] ?? '';
-        $humidity = $data['main']['humidity'] ?? '';
-        $wind = $data['wind']['speed'] ?? '';
-
-        // Step 2: Create weather message
-        $message = $this->createMessage($weatherMain, $temp, $humidity, $wind);
-
-        // Step 3: Send OneSignal notification (using filters by city tag)
-        $this->sendOneSignalNotification($city, $message);
-    }
-
-    private function createMessage($weather, $temp, $humidity, $wind)
-    {
-        $advice = match (strtolower($weather)) {
-            'rain', 'drizzle', 'thunderstorm' => "☔ It's rainy! Don't forget your umbrella!",
-            'clear' => "☀️ It's sunny today! Stay hydrated and wear sunglasses.",
-            'clouds' => "⛅ It's cloudy, but a good day for a walk.",
-            'snow' => "❄️ Snowy weather! Keep yourself warm.",
-            default => "🌤️ Stay prepared for changing weather conditions."
-        };
-
-        return "{$advice}\n🌡 Temp: {$temp}°C | 💧 Humidity: {$humidity}% | 🌬 Wind: {$wind} m/s";
-    }
-
-    private function sendOneSignalNotification($city, $message)
-    {
-        $appId = env('ONESIGNAL_APP_ID');
-        $apiKey = env('ONESIGNAL_API_KEY');
-
-        $response = Http::withHeaders([
-            'Authorization' => 'Basic ' . $apiKey,
-            'Content-Type' => 'application/json',
-        ])->post('https://onesignal.com/api/v1/notifications', [
-            'app_id' => $appId,
-            'filters' => [
-                ['field' => 'tag', 'key' => 'city', 'relation' => '=', 'value' => $city]
-            ],
-            'headings' => ['en' => "Weather Update - {$city}"],
-            'contents' => ['en' => $message],
-        ]);
-
-        if ($response->successful()) {
-            $this->info("📩 Notification sent for {$city}");
-        } else {
-            $this->error("⚠️ Failed to send notification for {$city}");
+            $this->info("Notification sent to city: $city");
         }
     }
 }
